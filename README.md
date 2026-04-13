@@ -1,8 +1,9 @@
 # EARSAudio
 
 Decoder and encoder for EA `.exa.snu` audio (EAAudioCore / RwAudioCore "SnP1"),
-as used by EA Redwood Shores / Visceral titles — Dead Space 1, The Godfather 2,
-etc. Currently supports the XAS1 codec (EA-XAS v1, codec id 4).
+as used by EA Redwood Shores / Visceral titles — Dead Space 1 & 2, The Godfather 2,
+etc. Supports the XAS1 codec (decode + encode) and EALayer3 V2 PCM / Spike
+(decode only).
 
 Produces:
 - `libears.dll` / `libears.a` — the C API (see `include/ears.h`)
@@ -25,7 +26,7 @@ Artifacts land in `build/bin/`.
 ```text
 ears_cli info   <input.exa.snu>
 ears_cli decode <input.exa.snu> <output.wav>
-ears_cli encode <input.wav>     <output.exa.snu>
+ears_cli encode <input.wav>     <output.exa.snu> [--frames-per-block N]
 ```
 
 Examples:
@@ -34,30 +35,64 @@ Examples:
 ears_cli info   sample.exa.snu
 ears_cli decode sample.exa.snu sample.wav
 ears_cli encode voice.wav      voice.exa.snu
+ears_cli encode voice.wav      voice.exa.snu --frames-per-block 26
 ```
 
-`encode` accepts 16-bit PCM WAV, mono or stereo, any sample rate ≤ 262143 Hz.
+`encode` accepts 16-bit PCM WAV (`WAVE_FORMAT_PCM` or `WAVE_FORMAT_EXTENSIBLE`),
+1–8 channels, any sample rate ≤ 262143 Hz.
+
+`--frames-per-block` controls the SNS block granularity. Default is 256 frames
+per block (one big block for short clips). The game's streamed files ship with
+26 frames per block; pass `--frames-per-block 26` to match that layout.
 
 ## Library API
+
+All entry points are declared in `include/ears.h`. Functions return
+`ears_status` (`EARS_OK` on success, negative on error; pass to
+`ears_strerror` for a message). Buffers returned via out-pointers are
+owned by the caller — free with `ears_free`.
+
+### Probe / decode
 
 ```c
 #include <ears.h>
 
 ears_info info;
 ears_probe_file("in.exa.snu", &info);
+/* info.codec, info.channels, info.sample_rate, info.num_samples, info.loop_flag */
 
-/* Decode to interleaved int16 PCM */
-int16_t *pcm; size_t samples;
+/* File → WAV (handles XAS1, EALayer3 V2 PCM, EALayer3 V2 Spike) */
 ears_decode_file_to_wav("in.exa.snu", "out.wav");
 
-/* Encode int16 PCM to SNU */
-ears_encode_wav_to_file("in.wav", "out.exa.snu");
-
-/* In-memory variants also available */
+/* In-memory */
+int16_t *pcm; size_t samples;
+ears_probe_memory(buf, size, &info);
 ears_decode_memory(buf, size, &info, &pcm, &samples);
-ears_encode_memory(pcm, samples, channels, rate, &snu_buf, &snu_size);
 ears_free(pcm);
 ```
+
+### Encode
+
+```c
+/* Simple: defaults (type=1 stream, 256 frames/block) */
+ears_encode_wav_to_file("in.wav", "out.exa.snu");
+ears_encode_memory(pcm, samples, channels, rate, &snu_buf, &snu_size);
+ears_free(snu_buf);
+
+/* With options */
+ears_encode_opts opts = {0};
+opts.frames_per_block = 26;     /* match the game's streaming block shape */
+ears_encode_wav_to_file_ex("in.wav", "out.exa.snu", &opts);
+ears_encode_memory_ex(pcm, samples, channels, rate, &opts, &snu_buf, &snu_size);
+```
+
+`ears_encode_opts` fields:
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `frames_per_block` | `0` → 256 | SNS frames per block, 1..524287. The game uses 26 for streamed files. |
+
+Encoder only emits XAS1. EALayer3 encoding is not supported.
 
 ## Format notes
 
@@ -82,13 +117,26 @@ ears_free(pcm);
 
 | Codec | id | Decode | Encode |
 |-------|----|--------|--------|
-| XAS1 (EA-XAS v1)     | 4 | yes | yes |
-| EALAYER3 v2 (Spike)  | 7 | no  | no  |
-| Others (EAXMA, GCADPCM, …) | | no | no |
+| XAS1 (EA-XAS v1)           | 4 | yes | yes |
+| EALAYER3 v2 PCM            | 6 | yes | no  |
+| EALAYER3 v2 Spike          | 7 | yes | no  |
+| Others (EAXMA, GCADPCM, …) |   | no  | no  |
 
-Dead Space 2 multiplayer samples use EALAYER3 v2 Spike and aren't handled yet.
+EALayer3 decoding uses a vendored [minimp3](https://github.com/lieff/minimp3)
+for the underlying MPEG-1 Layer III work; the EA-frame reframing logic is
+derived from vgmstream's `mpeg_custom_utils_ealayer3.c`. Multichannel
+(> 2 channels) is handled for XAS1 only — EALayer3 content is always 1–2
+channels in practice.
+
+Seek tables (TOB1 / the byte[1]=0x0C variant) are not written; the encoder
+emits a single-buffer SNU that the runtime will still parse, but it won't
+be byte-identical to shipped streamed files that carry a precomputed table.
 
 ## Credits
 
-- vgmstream — reference for the SNU/EAAC/XAS1 format
-  (<https://github.com/vgmstream/vgmstream>)
+- [vgmstream](https://github.com/vgmstream/vgmstream) — reference for the
+  SNU/EAAC/XAS1 format and the EALayer3 reframing logic
+- [minimp3](https://github.com/lieff/minimp3) (Lion Yang, CC0) — vendored MP3
+  decoder used by the EALayer3 path; see `third_party/minimp3.h`
+- EALayer3 format originally reverse-engineered by Zench
+  (<https://bitbucket.org/Zenchreal/ealayer3>)

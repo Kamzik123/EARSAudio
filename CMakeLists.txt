@@ -10,8 +10,9 @@ else()
     add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 endif()
 
-add_library(ears SHARED src/ears.c)
+add_library(ears SHARED src/ears.c src/ealayer3.c)
 target_include_directories(ears PUBLIC include)
+target_include_directories(ears PRIVATE third_party)
 target_compile_definitions(ears PRIVATE EARS_BUILD_DLL)
 
 add_executable(ears_cli src/cli.c)

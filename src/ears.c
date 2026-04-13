@@ -206,9 +206,17 @@ ears_status ears_decode_memory(const void *data, size_t size, ears_info *out_inf
         out_info->loop_flag = h.loop_flag;
         out_info->loop_end = h.num_samples;
     }
-    if (h.codec != 4 /* XAS1 */) return EARS_ERR_UNSUPPORTED;
-    return decode_xas1_stream((const uint8_t *)data, size, body,
-                              h.channels, h.num_samples, out_pcm, out_samples);
+    if (h.codec == 4 /* XAS1 */) {
+        return decode_xas1_stream((const uint8_t *)data, size, body,
+                                  h.channels, h.num_samples, out_pcm, out_samples);
+    }
+    if (h.codec == 6 || h.codec == 7 /* EALAYER3 V2 PCM / Spike */) {
+        extern int ears_decode_ealayer3_v2(const uint8_t *, size_t, size_t, int, int,
+                                           int16_t **, size_t *);
+        return ears_decode_ealayer3_v2((const uint8_t *)data, size, body,
+                                       h.channels, h.num_samples, out_pcm, out_samples);
+    }
+    return EARS_ERR_UNSUPPORTED;
 }
 
 void ears_free(void *p) { free(p); }
