@@ -1,9 +1,11 @@
 # EARSAudio
 
-Decoder and encoder for EA `.exa.snu` audio (EAAudioCore / RwAudioCore "SnP1"),
-as used by EA Redwood Shores / Visceral titles — Dead Space 1 & 2, The Godfather 2,
-etc. Supports the XAS1 codec (decode + encode) and EALayer3 V2 PCM / Spike
-(decode only).
+Decoder and encoder for EA audio used by Redwood Shores / Visceral titles:
+
+- **`.exa.snu`** — SNU / EAAudioCore container (Dead Space 1 & 2, Godfather 2).
+  Supports XAS1 (decode + encode) and EALayer3 V2 PCM / Spike (decode only).
+- **`.exa`** — SCHl / GSTR container (Godfather 1, older EA games).
+  Supports EA-XA v2 (decode + encode, mono).
 
 Produces:
 - `libears.dll` / `libears.a` — the C API (see `include/ears.h`)
@@ -24,18 +26,24 @@ Artifacts land in `build/bin/`.
 ## CLI usage
 
 ```text
-ears_cli info   <input.exa.snu>
-ears_cli decode <input.exa.snu> <output.wav>
-ears_cli encode <input.wav>     <output.exa.snu> [--frames-per-block N]
+ears_cli info   <input>
+ears_cli decode <input>         <output.wav>
+ears_cli encode <input.wav>     <output.exa.snu|output.exa> [--frames-per-block N]
 ```
+
+`info` and `decode` auto-detect SNU vs SCHl from the magic bytes. `encode`
+picks the container from the output extension: `.exa.snu` → XAS1 SNU,
+`.exa` → EA-XA v2 SCHl.
 
 Examples:
 
 ```sh
 ears_cli info   sample.exa.snu
 ears_cli decode sample.exa.snu sample.wav
+ears_cli decode gf1_voice.exa  gf1_voice.wav
 ears_cli encode voice.wav      voice.exa.snu
 ears_cli encode voice.wav      voice.exa.snu --frames-per-block 26
+ears_cli encode voice.wav      voice.exa
 ```
 
 `encode` accepts 16-bit PCM WAV (`WAVE_FORMAT_PCM` or `WAVE_FORMAT_EXTENSIBLE`),
@@ -84,6 +92,10 @@ ears_encode_opts opts = {0};
 opts.frames_per_block = 26;     /* match the game's streaming block shape */
 ears_encode_wav_to_file_ex("in.wav", "out.exa.snu", &opts);
 ears_encode_memory_ex(pcm, samples, channels, rate, &opts, &snu_buf, &snu_size);
+
+/* SCHl / EA-XA v2 (mono) */
+ears_encode_schl_wav_to_file("in.wav", "out.exa");
+ears_encode_schl_memory(pcm, samples, rate, &exa_buf, &exa_size);
 ```
 
 `ears_encode_opts` fields:
@@ -115,12 +127,21 @@ Encoder only emits XAS1. EALayer3 encoding is not supported.
 
 ## Status
 
+**SNU container:**
+
 | Codec | id | Decode | Encode |
 |-------|----|--------|--------|
 | XAS1 (EA-XAS v1)           | 4 | yes | yes |
 | EALAYER3 v2 PCM            | 6 | yes | no  |
 | EALAYER3 v2 Spike          | 7 | yes | no  |
 | Others (EAXMA, GCADPCM, …) |   | no  | no  |
+
+**SCHl container:**
+
+| Codec | Decode | Encode |
+|-------|--------|--------|
+| EA-XA v2 (mono) | yes | yes |
+| Other SCHl codecs (MT10/5, PCM, VAG, DSP, …) | no | no |
 
 EALayer3 decoding uses a vendored [minimp3](https://github.com/lieff/minimp3)
 for the underlying MPEG-1 Layer III work; the EA-frame reframing logic is

@@ -175,8 +175,18 @@ static ears_status decode_xas1_stream(const uint8_t *data, size_t size,
 
 /* Public API */
 
+extern int ears_probe_schl(const uint8_t *data, size_t size, ears_info *out_info);
+extern int ears_decode_schl(const uint8_t *data, size_t size, ears_info *out_info,
+                            int16_t **out_pcm, size_t *out_samples);
+
+static int is_schl(const uint8_t *p, size_t size) {
+    return size >= 4 && p[0] == 'S' && p[1] == 'C' && p[2] == 'H' && p[3] == 'l';
+}
+
 ears_status ears_probe_memory(const void *data, size_t size, ears_info *out) {
     if (!data || !out) return EARS_ERR_ARG;
+    if (is_schl((const uint8_t *)data, size))
+        return ears_probe_schl((const uint8_t *)data, size, out);
     eaac_hdr h; size_t body;
     ears_status s = parse_snu((const uint8_t *)data, size, &h, &body);
     if (s != EARS_OK) return s;
@@ -194,6 +204,8 @@ ears_status ears_probe_memory(const void *data, size_t size, ears_info *out) {
 ears_status ears_decode_memory(const void *data, size_t size, ears_info *out_info,
                                int16_t **out_pcm, size_t *out_samples) {
     if (!data || !out_pcm || !out_samples) return EARS_ERR_ARG;
+    if (is_schl((const uint8_t *)data, size))
+        return ears_decode_schl((const uint8_t *)data, size, out_info, out_pcm, out_samples);
     eaac_hdr h; size_t body;
     ears_status s = parse_snu((const uint8_t *)data, size, &h, &body);
     if (s != EARS_OK) return s;

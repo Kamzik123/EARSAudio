@@ -7,9 +7,12 @@
 static void usage(const char *prog) {
     fprintf(stderr,
         "Usage:\n"
-        "  %s info <input.exa.snu>\n"
-        "  %s decode <input.exa.snu> <output.wav>\n"
-        "  %s encode <input.wav> <output.exa.snu> [--frames-per-block N]\n",
+        "  %s info   <input.exa.snu | input.exa>\n"
+        "  %s decode <input.exa.snu | input.exa> <output.wav>\n"
+        "  %s encode <input.wav> <output.exa.snu | output.exa> [--frames-per-block N]\n"
+        "\n"
+        "  encode output extension picks the container:\n"
+        "    .exa.snu -> SNU / XAS1    .exa -> SCHl / EA-XA v2 (mono)\n",
         prog, prog, prog);
 }
 
@@ -23,6 +26,7 @@ static const char *codec_name(int c) {
         case 6: return "EALAYER3_V2_PCM";
         case 7: return "EALAYER3_V2_SPIKE";
         case 8: return "GCADPCM";
+        case 100: return "EA-XA v2 (SCHl)";
         default: return "?";
     }
 }
@@ -66,12 +70,18 @@ int main(int argc, char **argv) {
                 return 1;
             }
         }
-        ears_status s = ears_encode_wav_to_file_ex(argv[2], argv[3], &opts);
+        /* Pick container by output extension: ".exa" without ".snu" → SCHl, else SNU. */
+        const char *out = argv[3];
+        size_t n = strlen(out);
+        int is_schl = n >= 4 && strcmp(out + n - 4, ".exa") == 0;
+        ears_status s = is_schl
+            ? ears_encode_schl_wav_to_file(argv[2], out)
+            : ears_encode_wav_to_file_ex(argv[2], out, &opts);
         if (s != EARS_OK) {
             fprintf(stderr, "encode: %s\n", ears_strerror(s));
             return 2;
         }
-        printf("wrote %s\n", argv[3]);
+        printf("wrote %s\n", out);
         return 0;
     }
 
