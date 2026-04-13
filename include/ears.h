@@ -74,10 +74,14 @@ EARS_API ears_status ears_encode_wav_to_file(const char *in_wav_path, const char
 EARS_API ears_status ears_encode_wav_to_file_ex(const char *in_wav_path, const char *out_snu_path,
                                                 const ears_encode_opts *opts);
 
-/* Encode PCM int16 (mono) to an EA SCHl container using EA-XA v2.
- * Used by older titles (Godfather 1 Xbox, early EA). */
+/* Encode PCM int16 to an EA SCHl container using EA-XA v2. Used by older titles
+ * (Godfather 1 Xbox, early EA). The "_memory" variant assumes mono input; the
+ * "_multi" variant handles 1..8 channels (interleaved). */
 EARS_API ears_status ears_encode_schl_memory(const int16_t *pcm, size_t samples, int sample_rate,
                                              void **out_data, size_t *out_size);
+EARS_API ears_status ears_encode_schl_memory_multi(const int16_t *pcm, size_t samples, int channels,
+                                                   int sample_rate,
+                                                   void **out_data, size_t *out_size);
 EARS_API ears_status ears_encode_schl_wav_to_file(const char *in_wav_path, const char *out_exa_path);
 
 EARS_API void ears_free(void *p);

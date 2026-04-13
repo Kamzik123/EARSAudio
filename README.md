@@ -93,9 +93,10 @@ opts.frames_per_block = 26;     /* match the game's streaming block shape */
 ears_encode_wav_to_file_ex("in.wav", "out.exa.snu", &opts);
 ears_encode_memory_ex(pcm, samples, channels, rate, &opts, &snu_buf, &snu_size);
 
-/* SCHl / EA-XA v2 (mono) */
+/* SCHl / EA-XA v2 — accepts 1..8 channels */
 ears_encode_schl_wav_to_file("in.wav", "out.exa");
-ears_encode_schl_memory(pcm, samples, rate, &exa_buf, &exa_size);
+ears_encode_schl_memory(pcm, samples, rate, &exa_buf, &exa_size);                /* mono */
+ears_encode_schl_memory_multi(pcm, samples, channels, rate, &exa_buf, &exa_size);
 ```
 
 `ears_encode_opts` fields:
@@ -140,7 +141,7 @@ Encoder only emits XAS1. EALayer3 encoding is not supported.
 
 | Codec | Decode | Encode |
 |-------|--------|--------|
-| EA-XA v2 (mono) | yes | yes |
+| EA-XA v2 (1–8 channels) | yes | yes |
 | Other SCHl codecs (MT10/5, PCM, VAG, DSP, …) | no | no |
 
 EALayer3 decoding uses a vendored [minimp3](https://github.com/lieff/minimp3)

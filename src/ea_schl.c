@@ -182,19 +182,25 @@ static int decode_xa_v2_frame(const uint8_t **p, const uint8_t *end,
     return n;
 }
 
-/* Decode the body: iterate SCDl blocks, decoding frames until num_samples reached. */
+/* Decode the body: iterate SCDl blocks, decoding frames until num_samples reached.
+ * Multi-channel: each block has a per-channel offset table at 0x0C, then each
+ * channel's frame stream laid out independently. Channels carry their own h1/h2
+ * history across blocks. Output PCM is channel-interleaved. */
 static int decode_schl_body(const uint8_t *buf, size_t size, const schl_header *h,
                             int16_t **out_pcm, size_t *out_samples) {
-    if (h->channels != 1) return EARS_ERR_UNSUPPORTED;
+    int N = h->channels;
+    if (N < 1 || N > 8) return EARS_ERR_UNSUPPORTED;
 
-    int16_t *pcm = (int16_t *)calloc((size_t)h->num_samples, sizeof(int16_t));
+    int16_t *pcm = (int16_t *)calloc((size_t)h->num_samples * N, sizeof(int16_t));
     if (!pcm) return EARS_ERR_MEMORY;
 
-    size_t off = h->header_end;
-    int filled = 0;
-    int hist1 = 0, hist2 = 0;
+    int hist1[8] = {0};
+    int hist2[8] = {0};
 
-    while (off + 8 <= size && filled < h->num_samples) {
+    size_t off = h->header_end;
+    int filled_per_ch = 0;
+
+    while (off + 8 <= size && filled_per_ch < h->num_samples) {
         uint32_t id   = rd32be(buf + off);
         uint32_t bsz  = rd32le(buf + off + 4);
         if (bsz < 8 || off + bsz > size) break;
@@ -205,33 +211,39 @@ static int decode_schl_body(const uint8_t *buf, size_t size, const schl_header *
         if (bsz < 12) { off += bsz; continue; }
         int block_samples = (int)rd32le(buf + off + 8);
 
-        /* For SCHl version >= 1 each block begins with per-channel u32 offsets
-         * (relative to end of that offsets array). EA-XA v2 on Xbox is version 2,
-         * so we always have channels * 4 bytes of offsets before audio. */
-        size_t off_table = (size_t)h->channels * 4;
-        if (0x0C + off_table >= bsz) { off += bsz; continue; }
-        uint32_t ch0_start = rd32le(buf + off + 0x0C);
-        const uint8_t *p   = buf + off + 0x0C + off_table + ch0_start;
-        const uint8_t *end = buf + off + bsz;
-        if (p > end) { off += bsz; continue; }
+        size_t off_table = (size_t)N * 4;
+        if (0x0C + off_table > bsz) { off += bsz; continue; }
+        const uint8_t *block_end = buf + off + bsz;
+        const uint8_t *table_end = buf + off + 0x0C + off_table;
 
-        int block_written = 0;
-        while (block_written < block_samples && filled < h->num_samples && p < end) {
-            int16_t tmp[28];
-            int want = block_samples - block_written;
-            if (want > 28) want = 28;
-            if (filled + want > h->num_samples) want = h->num_samples - filled;
-            int got = decode_xa_v2_frame(&p, end, tmp, want, &hist1, &hist2);
-            if (got == 0) break;
-            memcpy(pcm + filled, tmp, (size_t)got * sizeof(int16_t));
-            filled += got;
-            block_written += got;
+        int decoded_this_block = block_samples;
+        if (filled_per_ch + decoded_this_block > h->num_samples)
+            decoded_this_block = h->num_samples - filled_per_ch;
+
+        for (int c = 0; c < N; c++) {
+            uint32_t ch_start = rd32le(buf + off + 0x0C + 4 * c);
+            const uint8_t *p = table_end + ch_start;
+            if (p > block_end) continue;
+
+            int written = 0;
+            while (written < decoded_this_block && p < block_end) {
+                int16_t tmp[28];
+                int want = decoded_this_block - written;
+                if (want > 28) want = 28;
+                int got = decode_xa_v2_frame(&p, block_end, tmp, want, &hist1[c], &hist2[c]);
+                if (got == 0) break;
+                for (int i = 0; i < got; i++) {
+                    pcm[((size_t)filled_per_ch + (size_t)written + (size_t)i) * (size_t)N + (size_t)c] = tmp[i];
+                }
+                written += got;
+            }
         }
+        filled_per_ch += decoded_this_block;
         off += bsz;
     }
 
     *out_pcm = pcm;
-    *out_samples = (size_t)filled;
+    *out_samples = (size_t)filled_per_ch;
     return EARS_OK;
 }
 
@@ -243,7 +255,7 @@ int ears_decode_schl(const uint8_t *data, size_t size, ears_info *info,
                      int16_t **out_pcm, size_t *out_samples) {
     schl_header h;
     if (!parse_schl(data, size, &h)) return EARS_ERR_FORMAT;
-    if (h.channels != 1) return EARS_ERR_UNSUPPORTED;
+    if (h.channels < 1 || h.channels > 8) return EARS_ERR_UNSUPPORTED;
 
     if (info) {
         memset(info, 0, sizeof(*info));
@@ -374,66 +386,66 @@ static size_t encode_xa_frame(const int16_t *src, int *h1, int *h2, uint8_t *out
     return 15;
 }
 
-/* Write the SCHl header with just the minimum patches the runtime needs.
- * Layout: "SCHl" + size_LE + "PT\0\0" + platform_LE(=0) + 0xFC 0xFC + 0xFD +
- *         0x80 0x01 0x02 (version=2) + 0x84 0x03 <rate BE3> +
- *         0x85 0x04 <samples BE4> + 0xFF 0x00 0x00 (pad). */
-static size_t write_schl_header(uint8_t *buf, int sample_rate, int num_samples) {
+/* Write the SCHl header with just the minimum patches the runtime needs. */
+static size_t write_schl_header(uint8_t *buf, int sample_rate, int num_samples, int channels) {
     size_t p = 0;
     memcpy(buf + p, "SCHl", 4); p += 4;
     p += 4; /* size, patched below */
-    /* PT\0\0 platform=0 */
     buf[p++] = 'P'; buf[p++] = 'T'; buf[p++] = 0; buf[p++] = 0;
-    buf[p++] = 0; buf[p++] = 0;        /* platform LE = PC */
-    buf[p++] = 0xFC;                    /* pad */
-    buf[p++] = 0xFD;                    /* info section marker */
-    buf[p++] = 0x80; buf[p++] = 0x01; buf[p++] = 0x02;               /* version=2 */
-    buf[p++] = 0x84; buf[p++] = 0x03;                                 /* sample rate (3 bytes BE) */
-    buf[p++] = (uint8_t)(sample_rate >> 16);
-    buf[p++] = (uint8_t)(sample_rate >> 8);
-    buf[p++] = (uint8_t)sample_rate;
-    buf[p++] = 0x85; buf[p++] = 0x04;                                 /* sample count (4 bytes BE) */
+    buf[p++] = 0; buf[p++] = 0;                                       /* platform LE = PC */
+    buf[p++] = 0xFD;                                                   /* info section marker */
+    buf[p++] = 0x80; buf[p++] = 0x01; buf[p++] = 0x02;                /* version=2 */
+    buf[p++] = 0x85; buf[p++] = 0x04;                                  /* sample count (4 bytes BE) */
     buf[p++] = (uint8_t)(num_samples >> 24);
     buf[p++] = (uint8_t)(num_samples >> 16);
     buf[p++] = (uint8_t)(num_samples >> 8);
     buf[p++] = (uint8_t)num_samples;
+    if (channels > 1) {
+        buf[p++] = 0x82; buf[p++] = 0x01; buf[p++] = (uint8_t)channels;
+    }
+    buf[p++] = 0x84; buf[p++] = 0x02;                                  /* sample rate (2 bytes BE) */
+    buf[p++] = (uint8_t)(sample_rate >> 8);
+    buf[p++] = (uint8_t)sample_rate;
     buf[p++] = 0xFF;                                                   /* end */
-    /* Align total SCHl block size to 4 bytes */
-    while (p & 3) buf[p++] = 0x00;
-    /* patch block size */
+    while (p & 3) buf[p++] = 0x00;                                     /* 4-byte align */
     wr32le(buf + 4, (uint32_t)p);
     return p;
 }
 
-int ears_encode_schl_memory(const int16_t *pcm, size_t samples, int sample_rate,
-                            void **out_data, size_t *out_size) {
+int ears_encode_schl_memory_multi(const int16_t *pcm, size_t samples, int channels,
+                                  int sample_rate, void **out_data, size_t *out_size) {
     if (!pcm || !out_data || !out_size) return EARS_ERR_ARG;
     if (samples == 0 || samples > 0x7FFFFFFF) return EARS_ERR_ARG;
     if (sample_rate <= 0) return EARS_ERR_ARG;
+    if (channels < 1 || channels > 8) return EARS_ERR_UNSUPPORTED;
 
-    /* Allocate generously: worst case every frame is a 61-byte PCM literal. */
-    size_t max_frame_bytes = ((samples + 27) / 28) * 61;
+    /* Worst case every frame on every channel is a 61-byte PCM literal. */
+    size_t max_frame_bytes = ((samples + 27) / 28) * 61 * (size_t)channels;
     size_t cap = 4096 + max_frame_bytes;
     uint8_t *buf = (uint8_t *)malloc(cap);
     if (!buf) return EARS_ERR_MEMORY;
 
     /* SCHl block */
-    size_t p = write_schl_header(buf, sample_rate, (int)samples);
+    size_t p = write_schl_header(buf, sample_rate, (int)samples, channels);
 
     /* SCCl block (stream count) */
     memcpy(buf + p, "SCCl", 4); p += 4;
     wr32le(buf + p, 0x0C); p += 4;
     wr32le(buf + p, 1);    p += 4;
 
-    /* SCDl blocks. Target ~1596 samples (57 frames) per block to mirror the
-     * game's shape. Frames are variable-size (15 or 61 bytes) because we may
-     * emit PCM literals for transients, so we encode each block's frames into
-     * a scratch area first, then emit the block with the resulting size. */
+    /* SCDl blocks. Target ~1596 samples (57 frames) per block per channel.
+     * Each channel is encoded independently with its own h1/h2 history; the
+     * block's offset table at 0x0C records where each channel's frame stream
+     * starts (relative to the end of the offsets array). */
     const int frames_per_block = 57;
     size_t total_frames = (samples + 27) / 28;
-    int hist1 = 0, hist2 = 0;
+    int hist1[8] = {0};
+    int hist2[8] = {0};
     size_t sample_cursor = 0;
-    uint8_t frame_scratch[57 * 61];
+
+    /* Per-channel scratch: up to 57 * 61 bytes */
+    uint8_t per_ch_scratch[8][57 * 61];
+    size_t per_ch_used[8];
 
     for (size_t fstart = 0; fstart < total_frames; fstart += frames_per_block) {
         size_t fend = fstart + frames_per_block;
@@ -443,19 +455,27 @@ int ears_encode_schl_memory(const int16_t *pcm, size_t samples, int sample_rate,
         if (sample_cursor + (size_t)block_samples > samples)
             block_samples = (int)(samples - sample_cursor);
 
-        size_t scratch_used = 0;
-        for (int f = 0; f < nframes; f++) {
-            int16_t frame_pcm[28] = {0};
-            size_t src_off = sample_cursor + (size_t)f * 28;
-            size_t copy = 28;
-            if (src_off + copy > samples) copy = samples - src_off;
-            memcpy(frame_pcm, pcm + src_off, copy * sizeof(int16_t));
-            scratch_used += encode_xa_frame(frame_pcm, &hist1, &hist2,
-                                            frame_scratch + scratch_used);
+        for (int c = 0; c < channels; c++) {
+            size_t used = 0;
+            for (int f = 0; f < nframes; f++) {
+                int16_t frame_pcm[28] = {0};
+                size_t src_off = sample_cursor + (size_t)f * 28;
+                size_t copy = 28;
+                if (src_off + copy > samples) copy = samples - src_off;
+                for (size_t i = 0; i < copy; i++)
+                    frame_pcm[i] = pcm[(src_off + i) * (size_t)channels + (size_t)c];
+                used += encode_xa_frame(frame_pcm, &hist1[c], &hist2[c],
+                                        per_ch_scratch[c] + used);
+            }
+            per_ch_used[c] = used;
         }
 
-        size_t block_data_size = 4 + scratch_used;          /* ch0 offset + frames */
-        while (block_data_size & 3) block_data_size++;      /* 4-byte align */
+        /* Block layout: header(12) + offset_table(4*N) + concatenated channel streams + pad-to-4. */
+        size_t off_table = (size_t)channels * 4;
+        size_t total_chan = 0;
+        for (int c = 0; c < channels; c++) total_chan += per_ch_used[c];
+        size_t block_data_size = off_table + total_chan;
+        while (block_data_size & 3) block_data_size++;
         size_t block_size = 12 + block_data_size;
 
         if (p + block_size > cap) {
@@ -468,10 +488,20 @@ int ears_encode_schl_memory(const int16_t *pcm, size_t samples, int sample_rate,
         memcpy(buf + p, "SCDl", 4);
         wr32le(buf + p + 4, (uint32_t)block_size);
         wr32le(buf + p + 8, (uint32_t)block_samples);
-        wr32le(buf + p + 0x0C, 0);                           /* ch0 start offset (relative) */
-        memcpy(buf + p + 0x10, frame_scratch, scratch_used);
-        size_t written = 0x10 + scratch_used;
-        while (written < block_size) buf[p + written++] = 0x00;
+
+        /* Write offset table; channel c starts at sum of previous channels' used bytes */
+        size_t running = 0;
+        for (int c = 0; c < channels; c++) {
+            wr32le(buf + p + 0x0C + 4 * c, (uint32_t)running);
+            running += per_ch_used[c];
+        }
+        /* Copy per-channel data after the table */
+        size_t write_off = 0x0C + off_table;
+        for (int c = 0; c < channels; c++) {
+            memcpy(buf + p + write_off, per_ch_scratch[c], per_ch_used[c]);
+            write_off += per_ch_used[c];
+        }
+        while (write_off < block_size) buf[p + write_off++] = 0x00;
 
         p += block_size;
         sample_cursor += (size_t)(nframes * 28);
@@ -493,10 +523,15 @@ int ears_encode_schl_memory(const int16_t *pcm, size_t samples, int sample_rate,
     return EARS_OK;
 }
 
-/* Minimal WAV reader that returns first channel as int16 — mirrors read_wav
- * in ears.c but extracts mono from stereo by keeping only left. Keeps the
- * SCHl encoder self-contained. */
-static int read_wav_mono(const char *path, int16_t **out_pcm, size_t *out_samples, int *out_rate) {
+int ears_encode_schl_memory(const int16_t *pcm, size_t samples, int sample_rate,
+                            void **out_data, size_t *out_size) {
+    return ears_encode_schl_memory_multi(pcm, samples, 1, sample_rate, out_data, out_size);
+}
+
+/* Minimal WAV reader (PCM int16, 1-8 channels). Self-contained so the SCHl
+ * encoder doesn't depend on read_wav from ears.c. */
+static int read_wav_any(const char *path, int16_t **out_pcm, size_t *out_samples,
+                        int *out_channels, int *out_rate) {
     FILE *f = fopen(path, "rb");
     if (!f) return EARS_ERR_IO;
     uint8_t hdr[12];
@@ -518,19 +553,17 @@ static int read_wav_mono(const char *path, int16_t **out_pcm, size_t *out_sample
             bits     = (uint16_t)(fmt[14] | (fmt[15] << 8));
             have_fmt = 1;
         } else if (!memcmp(chunk, "data", 4)) {
-            if (!have_fmt || (fmt_tag != 1 && fmt_tag != 0xFFFE) || bits != 16 || channels < 1) {
+            if (!have_fmt || (fmt_tag != 1 && fmt_tag != 0xFFFE) || bits != 16
+                    || channels < 1 || channels > 8) {
                 fclose(f); return EARS_ERR_UNSUPPORTED;
             }
             size_t nsamp = csz / (size_t)(channels * 2);
-            int16_t *buf = (int16_t *)malloc(nsamp * sizeof(int16_t));
+            int16_t *buf = (int16_t *)malloc(nsamp * channels * sizeof(int16_t));
             if (!buf) { fclose(f); return EARS_ERR_MEMORY; }
-            int16_t *tmp = (int16_t *)malloc((size_t)csz);
-            if (!tmp) { free(buf); fclose(f); return EARS_ERR_MEMORY; }
-            if (fread(tmp, 1, csz, f) != csz) { free(tmp); free(buf); fclose(f); return EARS_ERR_IO; }
-            for (size_t i = 0; i < nsamp; i++) buf[i] = tmp[i * channels];
-            free(tmp);
+            if (fread(buf, 1, csz, f) != csz) { free(buf); fclose(f); return EARS_ERR_IO; }
             fclose(f);
-            *out_pcm = buf; *out_samples = nsamp; *out_rate = (int)rate;
+            *out_pcm = buf; *out_samples = nsamp;
+            *out_channels = channels; *out_rate = (int)rate;
             return EARS_OK;
         } else {
             if (fseek(f, (long)csz, SEEK_CUR)) { fclose(f); return EARS_ERR_IO; }
@@ -541,11 +574,11 @@ static int read_wav_mono(const char *path, int16_t **out_pcm, size_t *out_sample
 }
 
 int ears_encode_schl_wav_to_file(const char *in_wav_path, const char *out_exa_path) {
-    int16_t *pcm = NULL; size_t samples = 0; int rate = 0;
-    int s = read_wav_mono(in_wav_path, &pcm, &samples, &rate);
+    int16_t *pcm = NULL; size_t samples = 0; int channels = 0, rate = 0;
+    int s = read_wav_any(in_wav_path, &pcm, &samples, &channels, &rate);
     if (s != EARS_OK) return s;
     void *data = NULL; size_t size = 0;
-    s = ears_encode_schl_memory(pcm, samples, rate, &data, &size);
+    s = ears_encode_schl_memory_multi(pcm, samples, channels, rate, &data, &size);
     free(pcm);
     if (s != EARS_OK) return s;
 
