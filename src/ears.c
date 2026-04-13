@@ -430,7 +430,7 @@ static int bb_reserve(bytebuf *b, size_t need) {
 ears_status ears_encode_memory(const int16_t *pcm, size_t samples, int channels, int sample_rate,
                                void **out_data, size_t *out_size) {
     if (!pcm || !out_data || !out_size) return EARS_ERR_ARG;
-    if (channels < 1 || channels > 2) return EARS_ERR_UNSUPPORTED;
+    if (channels < 1 || channels > 8) return EARS_ERR_UNSUPPORTED;
     if (sample_rate <= 0 || sample_rate > 0x3FFFF) return EARS_ERR_ARG;
     if (samples == 0 || samples > 0x1FFFFFFF) return EARS_ERR_ARG;
 
@@ -450,13 +450,16 @@ ears_status ears_encode_memory(const int16_t *pcm, size_t samples, int channels,
     wr_u32le(bb.buf + 8, (uint32_t)body_offset);
     /* bytes 12..15 zero */
 
-    /* SNR header (BE packed): version=0, codec=4 (XAS1), channels-1, sample_rate, type=0 (RAM),
-     * loop=0, num_samples. Type RAM is what the game uses for fully-resident sound effects. */
+    /* SNR header (BE packed): version=0, codec=4 (XAS1), channels-1, sample_rate, type=1 (stream),
+     * loop=0, num_samples. All .exa.snu files shipped by the game use type=1: the SNU container
+     * embeds the SNS body and the game streams it from that offset (see PlaySnr / the
+     * PLAY1PARAM_STREAMFILEOFFSET doc string). Writing type=0 produces files the runtime
+     * mis-parses. */
     uint32_t h1 = ((uint32_t)0 << 28)
                 | ((uint32_t)4 << 24)
                 | (((uint32_t)channels - 1) << 18)
                 | ((uint32_t)sample_rate & 0x3FFFF);
-    uint32_t h2 = ((uint32_t)0 << 30) | ((uint32_t)0 << 29) | ((uint32_t)samples & 0x1FFFFFFF);
+    uint32_t h2 = ((uint32_t)1 << 30) | ((uint32_t)0 << 29) | ((uint32_t)samples & 0x1FFFFFFF);
     wr_u32be(bb.buf + 0x10, h1);
     wr_u32be(bb.buf + 0x14, h2);
 
@@ -464,8 +467,9 @@ ears_status ears_encode_memory(const int16_t *pcm, size_t samples, int channels,
     size_t total_frames = (samples + 127) / 128;
     size_t bytes_per_frame = (size_t)channels * 0x4c;
 
-    /* Scratch: padded input buffer per frame (interleaved int16) */
-    int16_t frame_pcm[128 * 2];
+    /* Scratch: padded input buffer per frame (interleaved int16), sized for any channel count */
+    int16_t *frame_pcm = (int16_t *)malloc((size_t)128 * channels * sizeof(int16_t));
+    if (!frame_pcm) return EARS_ERR_MEMORY;
     int16_t chan_buf[128];
 
     /* Emit blocks of up to `frames_per_block` frames. Game's streamed files use
@@ -483,10 +487,10 @@ ears_status ears_encode_memory(const int16_t *pcm, size_t samples, int channels,
 
         size_t block_data_size = n_frames * bytes_per_frame;
         size_t block_size = 8 + block_data_size;
-        if (block_size > 0x00FFFFFF) return EARS_ERR_FORMAT;
+        if (block_size > 0x00FFFFFF) { free(frame_pcm); return EARS_ERR_FORMAT; }
 
         /* block header */
-        if (!bb_reserve(&bb, block_size)) return EARS_ERR_MEMORY;
+        if (!bb_reserve(&bb, block_size)) { free(frame_pcm); return EARS_ERR_MEMORY; }
         uint32_t bhdr = ((uint32_t)(is_last ? 0x80 : 0x00) << 24) | (uint32_t)block_size;
         wr_u32be(bb.buf + bb.size, bhdr);
 
@@ -501,7 +505,7 @@ ears_status ears_encode_memory(const int16_t *pcm, size_t samples, int channels,
 
         for (size_t f = 0; f < n_frames; f++) {
             size_t src_start = (frame_cursor + f) * 128;
-            memset(frame_pcm, 0, sizeof(int16_t) * 128 * channels);
+            memset(frame_pcm, 0, (size_t)128 * channels * sizeof(int16_t));
             size_t to_copy = 128;
             if (src_start + to_copy > samples) to_copy = samples - src_start;
             memcpy(frame_pcm, pcm + src_start * channels,
@@ -517,6 +521,7 @@ ears_status ears_encode_memory(const int16_t *pcm, size_t samples, int channels,
         sample_cursor += block_samples_covered;
     }
 
+    free(frame_pcm);
     *out_data = bb.buf;
     *out_size = bb.size;
     return EARS_OK;
@@ -546,7 +551,8 @@ static ears_status read_wav(const char *path, int16_t **out_pcm, size_t *out_sam
             bits = (uint16_t)(fmt[14] | (fmt[15] << 8));
             have_fmt = 1;
         } else if (memcmp(chunk, "data", 4) == 0) {
-            if (!have_fmt || fmt_tag != 1 || bits != 16 || channels < 1 || channels > 2) {
+            if (!have_fmt || (fmt_tag != 1 && fmt_tag != 0xFFFE) ||
+                bits != 16 || channels < 1 || channels > 8) {
                 fclose(f); return EARS_ERR_UNSUPPORTED;
             }
             size_t nsamp = csz / (size_t)(channels * 2);
