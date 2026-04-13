@@ -9,7 +9,7 @@ static void usage(const char *prog) {
         "Usage:\n"
         "  %s info <input.exa.snu>\n"
         "  %s decode <input.exa.snu> <output.wav>\n"
-        "  %s encode <input.wav> <output.exa.snu>\n",
+        "  %s encode <input.wav> <output.exa.snu> [--frames-per-block N]\n",
         prog, prog, prog);
 }
 
@@ -57,7 +57,16 @@ int main(int argc, char **argv) {
     }
 
     if (strcmp(argv[1], "encode") == 0 && argc >= 4) {
-        ears_status s = ears_encode_wav_to_file(argv[2], argv[3]);
+        ears_encode_opts opts = {0};
+        for (int i = 4; i < argc; i++) {
+            if (strcmp(argv[i], "--frames-per-block") == 0 && i + 1 < argc) {
+                opts.frames_per_block = atoi(argv[++i]);
+            } else {
+                fprintf(stderr, "unknown encode option: %s\n", argv[i]);
+                return 1;
+            }
+        }
+        ears_status s = ears_encode_wav_to_file_ex(argv[2], argv[3], &opts);
         if (s != EARS_OK) {
             fprintf(stderr, "encode: %s\n", ears_strerror(s));
             return 2;

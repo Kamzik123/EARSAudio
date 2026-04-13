@@ -427,12 +427,17 @@ static int bb_reserve(bytebuf *b, size_t need) {
     return 1;
 }
 
-ears_status ears_encode_memory(const int16_t *pcm, size_t samples, int channels, int sample_rate,
-                               void **out_data, size_t *out_size) {
+ears_status ears_encode_memory_ex(const int16_t *pcm, size_t samples, int channels, int sample_rate,
+                                  const ears_encode_opts *opts,
+                                  void **out_data, size_t *out_size) {
     if (!pcm || !out_data || !out_size) return EARS_ERR_ARG;
     if (channels < 1 || channels > 8) return EARS_ERR_UNSUPPORTED;
     if (sample_rate <= 0 || sample_rate > 0x3FFFF) return EARS_ERR_ARG;
     if (samples == 0 || samples > 0x1FFFFFFF) return EARS_ERR_ARG;
+
+    int fpb = opts ? opts->frames_per_block : 0;
+    if (fpb < 0 || fpb > 524287) return EARS_ERR_ARG;
+    if (fpb == 0) fpb = 256;
 
     const size_t body_offset = 0x20;
     bytebuf bb = {0};
@@ -474,7 +479,7 @@ ears_status ears_encode_memory(const int16_t *pcm, size_t samples, int channels,
 
     /* Emit blocks of up to `frames_per_block` frames. Game's streamed files use
      * 26-27 frames per block; RAM (type=0) files commonly use a single block. */
-    const size_t frames_per_block = 256; /* safe upper bound; RAM is fine in one block too */
+    const size_t frames_per_block = (size_t)fpb;
 
     size_t frames_remaining = total_frames;
     size_t sample_cursor = 0;
@@ -571,13 +576,19 @@ static ears_status read_wav(const char *path, int16_t **out_pcm, size_t *out_sam
     return EARS_ERR_FORMAT;
 }
 
-ears_status ears_encode_wav_to_file(const char *in_wav_path, const char *out_snu_path) {
+ears_status ears_encode_memory(const int16_t *pcm, size_t samples, int channels, int sample_rate,
+                               void **out_data, size_t *out_size) {
+    return ears_encode_memory_ex(pcm, samples, channels, sample_rate, NULL, out_data, out_size);
+}
+
+ears_status ears_encode_wav_to_file_ex(const char *in_wav_path, const char *out_snu_path,
+                                       const ears_encode_opts *opts) {
     int16_t *pcm = NULL; size_t samples = 0; int channels = 0, rate = 0;
     ears_status s = read_wav(in_wav_path, &pcm, &samples, &channels, &rate);
     if (s != EARS_OK) return s;
 
     void *snu = NULL; size_t snu_size = 0;
-    s = ears_encode_memory(pcm, samples, channels, rate, &snu, &snu_size);
+    s = ears_encode_memory_ex(pcm, samples, channels, rate, opts, &snu, &snu_size);
     free(pcm);
     if (s != EARS_OK) return s;
 
@@ -587,4 +598,8 @@ ears_status ears_encode_wav_to_file(const char *in_wav_path, const char *out_snu
     fclose(f);
     free(snu);
     return w == snu_size ? EARS_OK : EARS_ERR_IO;
+}
+
+ears_status ears_encode_wav_to_file(const char *in_wav_path, const char *out_snu_path) {
+    return ears_encode_wav_to_file_ex(in_wav_path, out_snu_path, NULL);
 }
